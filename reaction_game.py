@@ -1,199 +1,113 @@
+from gpiozero import RGBLED, Button, Buzzer
+from time import perf_counter, sleep
+import random
 import csv
 import os
-import random
-import statistics
-import time
-from datetime import datetime
 
-from gpiozero import LED, Button, Buzzer
-from signal import pause
-
-BUTTON_PIN = 17
-LED_PIN = 18
-BUZZER_PIN = 23
+# GPIO setup
+rgb = RGBLED(18, 23, 24)   # R, G, B
+button = Button(17)
+buzzer = Buzzer(25)
 
 LOG_FILE = "reaction_log.csv"
-USE_BUZZER = True
-
-led = LED(LED_PIN)
-button = Button(BUTTON_PIN, pull_up=True)
-buzzer = Buzzer(BUZZER_PIN) if USE_BUZZER else None
 
 
-def setup_log_file():
-    """
-    Creates the CSV log file with headers if it does not already exist.
-    """
-    if not os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "w", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow([
-                "timestamp",
-                "round",
-                "result",
-                "reaction_time_ms"
-            ])
+# Utility
+def beep(duration=0.1):
+    buzzer.on()
+    sleep(duration)
+    buzzer.off()
 
 
-def log_result(round_number, result, reaction_time_ms):
-    """
-    Appends one game result to the CSV file.
-
-    :param round_number: the round number
-    :param result: round outcome such as valid or false_start
-    :param reaction_time_ms: reaction time in milliseconds, or blank if none
-    """
-    with open(LOG_FILE, "a", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([
-            datetime.now().isoformat(timespec="seconds"),
-            round_number,
-            result,
-            reaction_time_ms
-        ])
-
-
-def beep_short():
-    """
-    Plays a short beep if the buzzer is enabled.
-    """
-    if buzzer is not None:
-        buzzer.on()
-        time.sleep(0.08)
-        buzzer.off()
-
-
-def beep_success():
-    """
-    Plays a quick two-part success beep if the buzzer is enabled.
-    """
-    if buzzer is not None:
-        for _ in range(2):
-            buzzer.on()
-            time.sleep(0.06)
-            buzzer.off()
-            time.sleep(0.05)
-
-
-def wait_for_button_release():
-    """
-    Waits until the button is no longer pressed.
-    """
+def wait_for_release():
     while button.is_pressed:
-        time.sleep(0.01)
+        sleep(0.01)
 
 
-def show_stats(valid_times, false_starts):
-    """
-    Prints current session statistics.
-
-    :param valid_times: list of valid reaction times in milliseconds
-    :param false_starts: number of false starts
-    """
-    print("\n--- Session Stats ---")
-    print(f"Valid rounds: {len(valid_times)}")
-    print(f"False starts: {false_starts}")
-
-    if valid_times:
-        print(f"Best time: {min(valid_times):.2f} ms")
-        print(f"Average time: {statistics.mean(valid_times):.2f} ms")
-
-        if len(valid_times) > 1:
-            print(f"Median time: {statistics.median(valid_times):.2f} ms")
-    print("---------------------\n")
+def log_result(time_ms):
+    new_file = not os.path.exists(LOG_FILE)
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if new_file:
+            writer.writerow(["reaction_time_ms"])
+        writer.writerow([round(time_ms, 2)])
 
 
-def play_round(round_number):
-    """
-    Runs one round of the reaction game.
+# Game Phases
+def countdown():
+    print("\nGet ready...")
+    for i in [3, 2, 1]:
+        print(i)
+        beep(0.05)
+        sleep(1)
 
-    :param round_number: the round number
-    :return: tuple of (result_string, reaction_time_ms or None)
-    """
-    led.off()
-    wait_for_button_release()
 
-    print(f"\nRound {round_number}")
-    print("Get ready...")
-    print("Wait for the LED, then press the button as fast as you can.")
-    print("Do NOT press early.")
+def wait_phase():
+    rgb.color = (1, 0, 0)  # red
+    delay = random.uniform(2, 5)
 
-    delay = random.uniform(2.0, 5.0)
-    start_wait = time.time()
-
-    while time.time() - start_wait < delay:
+    start = perf_counter()
+    while perf_counter() - start < delay:
         if button.is_pressed:
-            print("Too early! False start.")
-            beep_short()
-            log_result(round_number, "false_start", "")
-            wait_for_button_release()
-            return "false_start", None
-        time.sleep(0.001)
-
-    led.on()
-    start_time = time.perf_counter()
-
-    while not button.is_pressed:
-        time.sleep(0.0005)
-
-    end_time = time.perf_counter()
-    led.off()
-
-    reaction_time_ms = (end_time - start_time) * 1000
-    print(f"Your reaction time: {reaction_time_ms:.2f} ms")
-    beep_success()
-    log_result(round_number, "valid", f"{reaction_time_ms:.2f}")
-    wait_for_button_release()
-    return "valid", reaction_time_ms
+            rgb.color = (0, 0, 1)  # blue = false start
+            print("❌ Too early!")
+            beep(0.4)
+            wait_for_release()
+            return False
+        sleep(0.001)
+    return True
 
 
+def reaction_phase():
+    rgb.color = (0, 1, 0)  # green
+    beep(0.1)
+
+    start = perf_counter()
+    button.wait_for_press()
+    end = perf_counter()
+
+    rgb.off()
+    wait_for_release()
+
+    return (end - start) * 1000
+
+
+# Main Loop
 def main():
-    """
-    Main program loop.
-    """
-    print("=" * 40)
-    print("Raspberry Pi Reaction Time Game")
-    print("=" * 40)
-    print("Controls:")
-    print("- Press Enter to start a round")
-    print("- Type q and press Enter to quit")
-    print()
+    scores = []
 
-    setup_log_file()
+    print("=== Reaction Trainer ===")
+    print("Wait for GREEN, then press the button.")
+    print("Press early = fail.\n")
 
-    round_number = 1
-    valid_times = []
-    false_starts = 0
+    while True:
+        input("Press Enter to start...")
 
-    try:
-        while True:
-            user_input = input("Press Enter to play, or type q to quit: ").strip().lower()
+        countdown()
 
-            if user_input == "q":
-                break
+        if not wait_phase():
+            continue
 
-            result, reaction_time = play_round(round_number)
+        reaction = reaction_phase()
+        scores.append(reaction)
+        log_result(reaction)
 
-            if result == "valid":
-                valid_times.append(reaction_time)
-            else:
-                false_starts += 1
+        best = min(scores)
+        avg = sum(scores) / len(scores)
 
-            show_stats(valid_times, false_starts)
-            round_number += 1
+        print(f"⏱ Time: {reaction:.2f} ms")
+        print(f"🏆 Best: {best:.2f} ms | 📊 Avg: {avg:.2f} ms\n")
 
-    except KeyboardInterrupt:
-        print("\nProgram interrupted.")
-
-    finally:
-        led.off()
-        if buzzer is not None:
-            buzzer.off()
-
-        print("\nFinal session summary:")
-        show_stats(valid_times, false_starts)
-        print(f"Results saved to: {LOG_FILE}")
+        # best score sound
+        if reaction == best:
+            print("🔥 NEW BEST!")
+            beep(0.3)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        rgb.off()
+        buzzer.off()
+        print("\nExiting...")
